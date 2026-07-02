@@ -73,6 +73,7 @@ public class RoutingMergeNode implements NodeAction {
 		logger.debug("RoutingMergeNode: merging results from {} sub-agents", subAgents.size());
 
 		List<String> formattedResults = new ArrayList<>();
+		String lastResult = null;
 		for (BaseAgent subAgent : subAgents) {
 			String outputKey = subAgent.getOutputKey();
 			if (outputKey == null) {
@@ -80,13 +81,23 @@ public class RoutingMergeNode implements NodeAction {
 			}
 			Optional<Object> outputOpt = state.value(outputKey);
 			if (outputOpt.isPresent()) {
-				String text = extractText(outputOpt.get());
+				String text = extractText(outputOpt.get(), outputKey);
 				if (text != null && !text.isBlank()) {
 					String source = capitalize(subAgent.name());
 					formattedResults.add("**From " + source + ":**\n" + text);
+					lastResult = text;
 					logger.debug("Collected result from {} (key: {})", subAgent.name(), outputKey);
 				}
 			}
+		}
+
+		// When the router delegated to a single sub-agent, that agent's answer is already the
+		// final response. Re-synthesizing it through the LLM would issue a redundant model call
+		// and emit a second, rephrased copy of the same answer to the user (gh-4616). Pass the
+		// single result through unchanged; only genuinely multi-source results need synthesis.
+		if (formattedResults.size() == 1) {
+			logger.debug("RoutingMergeNode: single routed result, returning it without re-synthesis");
+			return Map.of(mergedOutputKey, lastResult);
 		}
 
 		String query = extractOriginalQuery(state);
@@ -119,7 +130,7 @@ public class RoutingMergeNode implements NodeAction {
 		return response.getResult().getOutput().getText();
 	}
 
-	private static String extractText(Object output) {
+	public static String extractText(Object output, String outputKey) {
 		if (output instanceof Message message) {
 			return message.getText();
 		}
@@ -127,6 +138,9 @@ public class RoutingMergeNode implements NodeAction {
 			Optional<?> val = gr.resultValue();
 			if (val.isPresent()) {
 				Object v = val.get();
+				if (v instanceof Map<?, ?> map) {
+					v = map.get(outputKey);
+				}
 				if (v instanceof Message m) {
 					return m.getText();
 				}
